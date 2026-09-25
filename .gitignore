@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large Datasets & Archives
+*.zip
+*.tar.gz
+*.mp4
+6ab10eb3b23ba_student_resource/
+6ab10eb3b23ba_student_resource.zip
+dataset/
+dataset_val/
+*.tsv
+*.csv
+*.parquet
+*.pkl
+
+# Scratch & temporary logs
+scratch/
+*.log
+.DS_Store
+
+# Virtual environments
+venv/
+.venv/
+env/
