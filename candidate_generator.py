@@ -14,7 +14,9 @@ from normalizer import (
     extract_name_tokens, 
     extract_prefix_shingles, 
     extract_phonetic_keys,
-    parse_address_anchors
+    parse_address_anchors,
+    get_token_sorted_name,
+    get_compressed_name
 )
 
 RE_COMPOUND_NUM = re.compile(r'\b[A-Za-z0-9]+[-/][A-Za-z0-9/-]+\b')
@@ -77,6 +79,18 @@ class MultiPassCandidateGenerator:
                     wp = f"wp:{t1}_{t2}"
                     self.idx_name_tokens[wp].append(i)
                     name_token_counts[wp] += 1
+                
+            # Token sorted name (e.g., "auto delhi parts")
+            if len(tokens) >= 2:
+                sn = f"sn:{' '.join(sorted(tokens))}"
+                self.idx_name_tokens[sn].append(i)
+                name_token_counts[sn] += 1
+                
+            # Compressed name (e.g. "walmart")
+            if len(no_space_name) >= 4:
+                cmp_k = f"cmp:{no_space_name}"
+                self.idx_name_tokens[cmp_k].append(i)
+                name_token_counts[cmp_k] += 1
                 
             for sh in set(shingles):
                 self.idx_name_shingles[sh].append(i)
@@ -194,6 +208,23 @@ class MultiPassCandidateGenerator:
                         w = 5.0 / math.log2(2 + len(posting))
                         for tgt_idx in posting:
                             name_scores[tgt_idx] += w
+                            
+            # Pass 1c: Token Sorted & Compressed
+            if len(tokens) >= 2:
+                sn = f"sn:{' '.join(sorted(tokens))}"
+                if sn in self.idx_name_tokens:
+                    posting = self.idx_name_tokens[sn]
+                    w = 5.5 / math.log2(2 + len(posting))
+                    for tgt_idx in posting:
+                        name_scores[tgt_idx] += w
+                        
+            if len(no_space_name) >= 4:
+                cmp_k = f"cmp:{no_space_name}"
+                if cmp_k in self.idx_name_tokens:
+                    posting = self.idx_name_tokens[cmp_k]
+                    w = 5.0 / math.log2(2 + len(posting))
+                    for tgt_idx in posting:
+                        name_scores[tgt_idx] += w
                         
             # Pass 2: Prefix Shingles
             for sh in set(shingles):

@@ -31,7 +31,7 @@ def extract_features_for_pairs(pairs: list[dict], s1_dict: dict, tgt_dict: dict)
     # 13: name_x_addr
     # 14: block_score
     # 15: rank
-    X = np.zeros((n_samples, 16), dtype=np.float32)
+    X = np.zeros((n_samples, 20), dtype=np.float32)
     y = np.zeros(n_samples, dtype=np.int32)
     
     # Cache normalized strings to avoid redundant normalization
@@ -41,12 +41,14 @@ def extract_features_for_pairs(pairs: list[dict], s1_dict: dict, tgt_dict: dict)
             norm_cache[text] = normalize_text(text)
         return norm_cache[text]
         
-    num_cache = {}
-    def get_nums(addr):
-        if addr not in num_cache:
+    # Cache address parsed data to avoid redundant work
+    addr_cache = {}
+    def get_addr_info(addr):
+        if addr not in addr_cache:
             p = parse_address_anchors(addr)
-            num_cache[addr] = (set(p['numbers']), p['is_empty'])
-        return num_cache[addr]
+            norm_a = get_norm(addr) if not p['is_empty'] else ""
+            addr_cache[addr] = (set(p['numbers']), p['postal_code'], p['is_empty'], norm_a)
+        return addr_cache[addr]
 
     for i in range(n_samples):
         if i > 0 and i % 250000 == 0:
@@ -72,12 +74,30 @@ def extract_features_for_pairs(pairs: list[dict], s1_dict: dict, tgt_dict: dict)
         n_len_diff = abs(len(s1_name_clean) - len(tgt_name_clean))
         n_exact = 1.0 if (s1_name_clean and s1_name_clean == tgt_name_clean) else 0.0
         
+        # Token metrics
+        s1_toks = s1_name_clean.split()
+        tgt_toks = tgt_name_clean.split()
+        first_tok_match = 1.0 if (s1_toks and tgt_toks and s1_toks[0] == tgt_toks[0]) else 0.0
+        shared_toks = float(len(set(s1_toks) & set(tgt_toks)))
+        
         # Addresses
         s1_raw_addr = str(s1_rec['business_address'])
         tgt_raw_addr = str(tgt_rec['business_address'])
         
-        s1_nums, s1_empty = get_nums(s1_raw_addr)
-        tgt_nums, tgt_empty = get_nums(tgt_raw_addr)
+        s1_nums, s1_pcode, s1_empty, s1_addr_clean = get_addr_info(s1_raw_addr)
+        tgt_nums, tgt_pcode, tgt_empty, tgt_addr_clean = get_addr_info(tgt_raw_addr)
+        
+        # Postal match signal
+        if s1_pcode and tgt_pcode:
+            if s1_pcode == tgt_pcode:
+                postal_match = 1.0
+                postal_prefix = 1.0
+            else:
+                postal_match = -1.0 # Hard location mismatch penalty!
+                postal_prefix = 1.0 if s1_pcode[:3] == tgt_pcode[:3] else 0.0
+        else:
+            postal_match = 0.0
+            postal_prefix = 0.0
         
         if tgt_empty or s1_empty:
             a_tset = 0.0
@@ -87,8 +107,6 @@ def extract_features_for_pairs(pairs: list[dict], s1_dict: dict, tgt_dict: dict)
             num_exact = 0.0
             is_empty = 1.0
         else:
-            s1_addr_clean = get_norm(s1_raw_addr)
-            tgt_addr_clean = get_norm(tgt_raw_addr)
             a_tset = fuzz.token_set_ratio(s1_addr_clean, tgt_addr_clean) / 100.0
             a_tsort = fuzz.token_sort_ratio(s1_addr_clean, tgt_addr_clean) / 100.0
             a_jw = distance.JaroWinkler.similarity(s1_addr_clean, tgt_addr_clean)
@@ -112,22 +130,28 @@ def extract_features_for_pairs(pairs: list[dict], s1_dict: dict, tgt_dict: dict)
         X[i, 4] = n_part
         X[i, 5] = n_len_diff
         X[i, 6] = n_exact
-        X[i, 7] = a_tset
-        X[i, 8] = a_tsort
-        X[i, 9] = a_jw
-        X[i, 10] = num_jaccard
-        X[i, 11] = num_exact
-        X[i, 12] = is_empty
-        X[i, 13] = n_x_a
-        X[i, 14] = b_score
-        X[i, 15] = rank
+        X[i, 7] = first_tok_match
+        X[i, 8] = shared_toks
+        X[i, 9] = a_tset
+        X[i, 10] = a_tsort
+        X[i, 11] = a_jw
+        X[i, 12] = num_jaccard
+        X[i, 13] = num_exact
+        X[i, 14] = postal_match
+        X[i, 15] = postal_prefix
+        X[i, 16] = is_empty
+        X[i, 17] = n_x_a
+        X[i, 18] = b_score
+        X[i, 19] = rank
         
     return X, y
 
 FEATURE_NAMES = [
     'name_ratio', 'name_token_sort', 'name_token_set', 'name_jaro_winkler',
     'name_partial_ratio', 'name_len_diff', 'name_exact_match',
+    'first_token_match', 'shared_token_count',
     'addr_token_set', 'addr_token_sort', 'addr_jaro_winkler',
-    'addr_num_jaccard', 'addr_num_exact', 'is_tgt_addr_empty',
+    'addr_num_jaccard', 'addr_num_exact', 
+    'postal_match', 'postal_prefix_match', 'is_tgt_addr_empty',
     'name_x_addr', 'block_score', 'rank'
 ]

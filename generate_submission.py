@@ -15,12 +15,14 @@ from candidate_generator import MultiPassCandidateGenerator, extract_compound_nu
 from feature_extractor import FEATURE_NAMES
 
 TEST_DIR = "dataset/test"
-MODEL_PATH = "models/lgb_reranker.txt"
+MODEL_PATH = "models/lgb_reranker_v2.txt"
 OUTPUT_DIR = "output"
 MATCHING_FILE = os.path.join(OUTPUT_DIR, "matching_results.tsv")
 CANDIDATE_FILE = os.path.join(OUTPUT_DIR, "candidate_pairs.tsv")
 
-PRED_THRESHOLD = 0.75
+PRED_THRESHOLD = 0.70
+SINGLETON_THRESHOLD = 0.60
+MAX_MATCHES_CAP = 8
 TOP_K = 25
 BATCH_SIZE = 25000
 
@@ -53,14 +55,16 @@ def process_country(country: str, model: lgb.Booster, out_match_f, out_cand_f):
     tgt_names_raw = targets_df["business_name"].to_list()
     tgt_addrs_raw = targets_df["business_address"].to_list()
     
-    # Pre-extracted arrays indexed by target integer position i (0 .. n_targets-1)
     tgt_clean_names = [normalize_text(n) for n in tgt_names_raw]
     tgt_clean_addrs = [normalize_text(a) for a in tgt_addrs_raw]
+    tgt_name_tokens = [n.split() for n in tgt_clean_names]
     tgt_num_sets = []
+    tgt_pcodes = []
     tgt_is_empty = []
     for a in tgt_addrs_raw:
         anchors = parse_address_anchors(a)
         tgt_num_sets.append(set(anchors['numbers']))
+        tgt_pcodes.append(anchors['postal_code'])
         tgt_is_empty.append(1.0 if anchors['is_empty'] else 0.0)
     print(f"[{country}] Target features precomputed in {time.time()-t0:.2f}s.", flush=True)
     
@@ -99,11 +103,14 @@ def process_country(country: str, model: lgb.Booster, out_match_f, out_cand_f):
         # Batch S1 precomputations
         batch_clean_names = [normalize_text(n) for n in batch_names]
         batch_clean_addrs = [normalize_text(a) for a in batch_addrs]
+        batch_name_tokens = [n.split() for n in batch_clean_names]
         batch_num_sets = []
+        batch_pcodes = []
         batch_is_empty = []
         for a in batch_addrs:
             anchors = parse_address_anchors(a)
             batch_num_sets.append(set(anchors['numbers']))
+            batch_pcodes.append(anchors['postal_code'])
             batch_is_empty.append(1.0 if anchors['is_empty'] else 0.0)
             
         # Create mini-dataframe for cg query
@@ -123,7 +130,6 @@ def process_country(country: str, model: lgb.Booster, out_match_f, out_cand_f):
         pair_s1_ids = []
         pair_tgt_ids = []
         
-        # Pre-build lookup from target_id string to integer index
         tgt_id_to_int = {tid: i for i, tid in enumerate(tgt_ids)}
         
         batch_candidates_list = []
@@ -141,9 +147,9 @@ def process_country(country: str, model: lgb.Booster, out_match_f, out_cand_f):
                     
         n_pairs = len(pair_s1_local_indices)
         
-        # C. Vectorized RapidFuzz Feature Extraction
+        # C. Vectorized RapidFuzz Feature Extraction (20 features)
         if n_pairs > 0:
-            X_batch = np.zeros((n_pairs, 16), dtype=np.float32)
+            X_batch = np.zeros((n_pairs, 20), dtype=np.float32)
             
             for p_i in range(n_pairs):
                 s_idx = pair_s1_local_indices[p_i]
@@ -162,9 +168,29 @@ def process_country(country: str, model: lgb.Booster, out_match_f, out_cand_f):
                 n_len_diff = abs(len(sn) - len(tn))
                 n_exact = 1.0 if (sn and sn == tn) else 0.0
                 
+                # Token alignment
+                s_toks = batch_name_tokens[s_idx]
+                t_toks = tgt_name_tokens[t_idx]
+                first_tok = 1.0 if (s_toks and t_toks and s_toks[0] == t_toks[0]) else 0.0
+                shared_toks = float(len(set(s_toks) & set(t_toks)))
+                
                 # Addresses
                 s_empty = batch_is_empty[s_idx]
                 t_empty = tgt_is_empty[t_idx]
+                
+                # Postal code match & mismatch penalty
+                s_p = batch_pcodes[s_idx]
+                t_p = tgt_pcodes[t_idx]
+                if s_p and t_p:
+                    if s_p == t_p:
+                        p_match = 1.0
+                        p_pfx = 1.0
+                    else:
+                        p_match = -1.0 # Hard branch mismatch penalty!
+                        p_pfx = 1.0 if s_p[:3] == t_p[:3] else 0.0
+                else:
+                    p_match = 0.0
+                    p_pfx = 0.0
                 
                 if s_empty == 1.0 or t_empty == 1.0:
                     a_tset = 0.0
@@ -197,35 +223,44 @@ def process_country(country: str, model: lgb.Booster, out_match_f, out_cand_f):
                 X_batch[p_i, 4] = n_part
                 X_batch[p_i, 5] = n_len_diff
                 X_batch[p_i, 6] = n_exact
-                X_batch[p_i, 7] = a_tset
-                X_batch[p_i, 8] = a_tsort
-                X_batch[p_i, 9] = a_jw
-                X_batch[p_i, 10] = num_jaccard
-                X_batch[p_i, 11] = num_exact
-                X_batch[p_i, 12] = is_empty
-                X_batch[p_i, 13] = n_x_a
-                X_batch[p_i, 14] = 0.0  # block_score
-                X_batch[p_i, 15] = float(rk)
+                X_batch[p_i, 7] = first_tok
+                X_batch[p_i, 8] = shared_toks
+                X_batch[p_i, 9] = a_tset
+                X_batch[p_i, 10] = a_tsort
+                X_batch[p_i, 11] = a_jw
+                X_batch[p_i, 12] = num_jaccard
+                X_batch[p_i, 13] = num_exact
+                X_batch[p_i, 14] = p_match
+                X_batch[p_i, 15] = p_pfx
+                X_batch[p_i, 16] = is_empty
+                X_batch[p_i, 17] = n_x_a
+                X_batch[p_i, 18] = 0.0  # block_score
+                X_batch[p_i, 19] = float(rk)
                 
             # D. Model Inference
             probs = model.predict(X_batch)
             
-            # Map predictions back to S1 entities
-            matches_by_s1 = defaultdict(list)
+            # Group candidate scores by S1 ID
+            cands_by_s1 = defaultdict(list)
             for p_i in range(n_pairs):
-                if probs[p_i] >= PRED_THRESHOLD:
-                    matches_by_s1[pair_s1_ids[p_i]].append(pair_tgt_ids[p_i])
+                cands_by_s1[pair_s1_ids[p_i]].append((pair_tgt_ids[p_i], probs[p_i]))
         else:
-            matches_by_s1 = defaultdict(list)
+            cands_by_s1 = defaultdict(list)
             
-        # E. Write Batch to Submission Files Directly
+        # E. Entity-Level Decision Logic (Singleton Guard + Dynamic Match Cap)
         for local_i, s1_id in enumerate(batch_ids):
             cands = batch_candidates_list[local_i]
-            matches = matches_by_s1.get(s1_id, [])
+            scored_cands = cands_by_s1.get(s1_id, [])
             
-            # Ensure matched IDs are strictly in candidates
-            cand_set = set(cands)
-            valid_matches = [m for m in matches if m in cand_set]
+            # Singleton Guard: if highest candidate probability is low, predict singleton (empty)!
+            max_prob = max((pr for _, pr in scored_cands), default=0.0)
+            if max_prob < SINGLETON_THRESHOLD:
+                valid_matches = []
+            else:
+                # Filter candidates passing threshold, sorted descending by prob, capped at MAX_MATCHES_CAP
+                passing = [tid for tid, pr in sorted(scored_cands, key=lambda x: x[1], reverse=True) if pr >= PRED_THRESHOLD]
+                cand_set = set(cands)
+                valid_matches = [m for m in passing if m in cand_set][:MAX_MATCHES_CAP]
             
             # Candidate row
             cands_str = ",".join(cands)

@@ -52,6 +52,19 @@ def normalize_text(text: str) -> str:
     
     return RE_SPACES.sub(' ', t).strip()
 
+def get_token_sorted_name(clean_name: str) -> str:
+    """Return alphabetically sorted tokens for transposition invariance."""
+    if not clean_name:
+        return ''
+    tokens = sorted(clean_name.split())
+    return ' '.join(tokens)
+
+def get_compressed_name(clean_name: str) -> str:
+    """Return alphanumeric string without spaces for fused brand names."""
+    if not clean_name:
+        return ''
+    return clean_name.replace(' ', '')
+
 def extract_name_tokens(clean_name: str) -> list[str]:
     """Extract significant name tokens (length >= 2)."""
     if not clean_name:
